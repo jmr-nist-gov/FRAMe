@@ -1,0 +1,514 @@
+---
+title: "Feature Reduction Assistant for Metabolomics"
+author: "NIST Marine Environmental Specimen Bank - Data Tool Development"
+date: "FRAMe v1.1: last update April 12, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, include=FALSE)
+if (require(dplyr) == FALSE) {
+  install.packages("dplyr")
+  library(dplyr)
+}
+knitr::opts_chunk$set(echo=FALSE, include=FALSE)
+if (require(tidyr) == FALSE) {
+  install.packages("tidyr")
+  library(tidyr)
+}
+knitr::opts_chunk$set(echo=FALSE, include=FALSE)
+if (require(ggplot2) == FALSE) {
+  install.packages("ggplot2")
+  library(ggplot2)
+}
+```
+
+```{r thresholds}
+# Thresholding values for removal of features in whole percentages.
+#--------------------------------------------------------------------------------------------------------------
+# NOTE: Replace '\' with '/' when pasting from Windows Explorer and point to your file
+# Set the working directory to the location of this file
+  if (!"Feature Reduction.Rmd" %in% list.files()) {
+    setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+  }
+  filename <- "raw/demo Untargeted_HILIC_UPLC.csv"
+#Set investigator's name
+  user = "[default]"
+#Features where mean area in BLANKS contributes GREATER THAN X% of mean area in QC will be removed.
+# DEFAULT 5
+# Set to 100000 to effectively turn off.
+  ThresholdBlankContribution <- 5
+#Features where QC RSD is GREATER THAN X will be removed.
+# DEFAULT 20
+# Set to 100000 to effectively turn off.
+  ThresholdQCrsd <- 20
+#Features with detection frequency in QC samples LESSER THAN X% will be removed.
+# DEFAULT 60
+# Set to -1 to effectively turn off.
+  ThresholdQCCountFrequency <- 60
+#Features with detection frequency in SAMPLES LESSER THAN X% will be removed.
+# DEFAULT 80
+# Set to -1 to effectively turn off.
+  ThresholdSAMPLECountFrequency <- 80
+#Features in SAMPLEs with RSD ratios LESSER THAN X% of QC samples will be removed.
+# DEFAULT 120
+# Set to -1 to effectively turn off.
+  ThresholdRSDratios <- 120
+#Features in SAMPLES with median area values LESSER THAN these two LOQ multipliers will be removed.
+# DEFAULT LO 10
+# DEFAULT HI 50
+# Set to 0 to effectively turn off.
+  LOQlo <- 10
+  LOQhi <- 50
+#The first n QC samples will be removed for batch stability.
+  LeadingQCSamples <- 3
+#The name, if any, of a class set to combine as SAMPLES.
+  combine_classes_on_text <- "Class"
+#The text for a missing value indicator (software dependent).
+  missing_indicator <- "NaN"
+#Informational columns ancillary to the features (e.g. m/z, RT, etc.) listed by column number
+# This can be any combination of column numbers:
+  # set infoColumns <- NULL to ignore
+  # set infoColumns <- c(2:5) to flag columns 2, 3, 4, and 5 as informational columns
+  # set infoColumns <- c(2,4,6) to flag columns 2, 4, and 6 as informationnl columns
+  infoColumns <- c(2:3)
+#--------------------------------------------------------------------------------------------------------------
+```
+
+```{r multiplot}
+# Multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+```{r, load and prep}
+# Load the file name given as a csv from the working directory.
+#--------------------------------------------------------------------------------------------------------------
+  metab <- read.csv(filename, header=FALSE)
+  if (length(infoColumns) != 0){
+    feature_info <- metab[,c(1,infoColumns)]
+  } else {
+    feature_info <- NULL
+  }
+  metab <- metab[,-infoColumns]
+
+# Transpose it to wider than long
+  metab <- t(metab)
+
+# Rename the unlabeled features
+  metab[1,-c(1:2)] <- paste("Feature",metab[1,-c(1:2)])
+  metab <- as.data.frame(metab)
+  names(metab) <- as.character(unlist(metab[1,]))
+  metab <- metab[-1,]
+
+# Remove all the NaNs from the dataset and replace with NA
+  metab[metab == missing_indicator] <- NA
+
+# Convert string data to numeric
+  metab[,-c(1:2)] <- as.numeric(as.character(unlist(metab[,-c(1:2)])))
+  metab[,1] <- as.numeric(as.character(metab[,1]))
+
+# Remove leading QC samples for system equilibartion by excluding the first [LeadingQCSamples] QC samples
+  if (LeadingQCSamples>0){
+    filtered <- metab %>%
+      select(one_of(c("Sample","Class"))) %>%
+      filter(Class == "QC") %>%
+      arrange(Sample) %>%
+      select(Sample) %>% 
+      slice(1:LeadingQCSamples)
+    metab <- metab[-which(metab$Sample %in% filtered$Sample),]
+  }
+```
+
+<hr/>
+Report generated `r Sys.time()` by `r user`.<br/>
+Loaded dataset `r getwd()`/`r filename`.<br/>
+<hr/>
+
+```{r, calculations}
+# Calculate mean, standard deviation, and relative standard deviation of peak areas by Class and Feature.
+#--------------------------------------------------------------------------------------------------------------
+  summary_metab <- metab %>% 
+    gather("Feature",'Area',3:dim(metab)[2], na.rm=T) %>%
+    group_by(Class, Feature) %>%
+    summarise(avg=mean(Area), median=median(Area), sd=sd(Area)) %>%
+    mutate(rsd=sd/avg*100)
+```
+
+```{r, blank_contribution}
+# Generate the list of features to remove based on high blank contribution.
+#--------------------------------------------------------------------------------------------------------------
+  blank_contribution <- summary_metab %>% 
+    select(Class, Feature, avg) %>% 
+    filter(Class=="Blank" | Class=="QC") %>%
+    spread(Class, avg) %>% 
+    filter(!is.na(Blank)) %>% 
+    select(Feature, Blank, QC) %>%
+    mutate(percent=(Blank/QC)*100)
+  # Now Remove features with blank contribution greater than [ThresholdBlankContribution]
+  remove_blank <- blank_contribution %>% 
+    filter(percent>=ThresholdBlankContribution) %>% 
+    select(Feature) %>% 
+    as.data.frame()
+```
+
+```{r, QC/BIOLOGICAL RSD ratio}
+# Remove features based on low QC/BIOLOGICAL RSD ratios.
+#--------------------------------------------------------------------------------------------------------------
+# First need to reclassify to combine some text-identified set of classes as "SAMPLES"
+  # Create a new "Group" column to combine multiple classes into one
+  Group=as.character(metab$Class)
+  Group[grep(combine_classes_on_text, Group)]="SAMPLES"
+  # Insert the new Group column at position 2 of the dataframe
+  metab=cbind(Sample=metab[,1], Group, metab[,2:dim(metab)[2]])
+  summary_metab2 <- metab %>% 
+    gather("Feature",'Area',4:dim(metab)[2], na.rm=T) %>%
+    group_by(Group, Feature) %>%
+    summarise(avg=mean(Area), median=median(Area), sd=sd(Area)) %>% 
+    mutate(rsd=sd/avg*100)
+# Generate the list of features to remove
+  low_variability <- summary_metab2 %>% 
+    select(-sd, -avg, -median) %>% 
+    spread(Group, rsd) %>% 
+    filter(!is.na(SAMPLES)) %>% 
+    select(Feature, SAMPLES, QC) %>%
+    mutate(percent=SAMPLES/QC*100)
+  # Now Remove features with blank contribution greater than [ThresholdBlankContribution]
+  remove_lowVAR <- low_variability %>% 
+    filter(percent<ThresholdRSDratios) %>% 
+    select(Feature) %>% 
+    as.data.frame()
+```
+
+```{r, SAMPLE detection frequency}
+# Generate the list of features to remove based on SAMPLE detection frequency.
+#--------------------------------------------------------------------------------------------------------------
+  SAMPLE_count <- as.data.frame(apply(metab[metab$Group=="SAMPLES",-c(1:3)], 2,
+                                      function(x) length(na.omit(x))))
+  names(SAMPLE_count)="Count"
+  divisorSAMPLE <- as.numeric(summary(metab$Group=="SAMPLES")[3][[1]])
+  SAMPLE_count <- SAMPLE_count %>%
+    mutate(Feature=as.character(row.names(SAMPLE_count))) %>%
+    mutate(CountFreq=Count/divisorSAMPLE*100)
+  SAMPLE_count <- SAMPLE_count[,c(2,1,3)]
+  remove_SAMPLEcount <- SAMPLE_count %>% 
+    filter(CountFreq<=ThresholdSAMPLECountFrequency) %>% 
+    select(Feature)
+```
+
+```{r, QC count frequency}
+# Generate the list of features to remove based on QC count instability.
+#--------------------------------------------------------------------------------------------------------------
+  QC_count <- as.data.frame(apply(metab[metab$Group=="QC",-c(1:3)], 2, function(x) length(na.omit(x))))
+  names(QC_count)="Count"
+  divisorQC <- as.numeric(summary(metab$Group=="QC")[3][[1]])
+  QC_count <- QC_count %>%
+    mutate(Feature=as.character(row.names(QC_count))) %>%
+    mutate(CountFreq=Count/divisorQC*100)
+  QC_count <- QC_count[,c(2,1,3)]
+  remove_QCcount <- QC_count %>% 
+    filter(CountFreq<=ThresholdQCCountFrequency) %>% 
+    select(Feature)
+```
+
+```{r, QC reproducibility}
+# Generate the list of features to remove based on inadequate reproducibility in the QC samples.
+#--------------------------------------------------------------------------------------------------------------
+  QC_RSD <- summary_metab %>%
+    ungroup() %>%
+    filter(Class=="QC") %>%
+    select(Feature, rsd)
+  remove_QCrsd <- QC_RSD %>%
+    filter(rsd>=ThresholdQCrsd) %>%
+    select(Feature)
+```
+
+```{r, Median filter}
+  median_check_blanks <- summary_metab2 %>%
+    ungroup() %>%
+    filter(Group=="Blank") %>%
+    select(-Group, -median, -rsd)
+  names(median_check_blanks)=c("Feature","Blank avg", "Blank sd")
+  median_check_samples <- summary_metab2 %>%
+    ungroup() %>%
+    filter(Group=="SAMPLES") %>%
+    select(-Group, -avg, -sd, -rsd)
+  names(median_check_samples)=c("Feature","Sample median")
+  median_check <- right_join(median_check_blanks, median_check_samples, by="Feature") %>%
+    filter(`Blank sd`!="NaN") %>%
+    filter(!is.na(`Blank sd`)) %>%
+    mutate("LOQ low"=(`Blank avg`+`Blank sd`*3)*LOQlo) %>%
+    mutate("LOQ high"=(`Blank avg`+`Blank sd`*3)*LOQhi) %>%
+    mutate(medRatio=`Sample median`/(`Blank avg`+`Blank sd`*3))
+  remove_median_LOQlo <- median_check %>%
+    filter(medRatio<=LOQlo) %>%
+    select(Feature)
+  remove_median_LOQhi <- median_check %>%
+    filter(medRatio<=LOQhi) %>%
+    select(Feature)
+```
+
+```{r, output}
+# Shape up an output table by defining which features were kept
+#--------------------------------------------------------------------------------------------------------------
+  remove_blank <- remove_blank %>% mutate("Blank Contribution"=1)
+  remove_lowVAR <- remove_lowVAR %>% mutate("Sample Variability"=1)
+  remove_SAMPLEcount <- remove_SAMPLEcount %>% mutate("Sample Count"=1)
+  remove_QCcount <- remove_QCcount %>% mutate("QC Count"=1)
+  remove_QCrsd <- remove_QCrsd %>% mutate("QC RSD"=1)
+  remove_median_LOQlo <- remove_median_LOQlo %>% mutate("LOQ Ratio Low"=1)
+  remove_median_LOQhi <- remove_median_LOQhi %>% mutate("LOQ Ratio High"=1)
+  features <- data.frame(Feature=names(metab)[-c(1:3)])
+  output <- features %>%
+    full_join(remove_blank, by="Feature") %>%
+    full_join(remove_lowVAR, by="Feature") %>%
+    full_join(remove_SAMPLEcount, by="Feature") %>%
+    full_join(remove_QCcount, by="Feature") %>%
+    full_join(remove_QCrsd, by="Feature") %>%
+    full_join(remove_median_LOQlo, by="Feature") %>%
+    full_join(remove_median_LOQhi, by="Feature")
+  output[is.na(output)]<-0
+  output <- cbind(output,"All Filters"=rowSums(output[,2:8]))
+  output$`All Filters`[which(output$`All Filters`>1)] <- 1
+  output[output==1]<-"Removed"
+  output[output==0]<-"Kept"
+  
+  # Reshape for graphing
+  output2 <- output %>% gather("Filter","Kept",2:9)
+  output2$Kept <- as.factor(output2$Kept)
+  totalRemoved <- dim(output2 %>% filter(Filter=="All Filters" & Kept=="Removed"))[1]
+  totalRemain <- dim(features)[1]-totalRemoved
+```
+
+**Dataset initially contained `r dim(metab)[2]` features.**
+
+* `r length(remove_blank$Feature)` features removed due to blank contribution<strong> >`r ThresholdBlankContribution`%</strong> of mean QC feature area.
+* `r length(remove_QCcount$Feature)` features removed due to presence in<strong> <`r ThresholdQCCountFrequency`%</strong> of QC samples.
+* `r length(remove_QCrsd$Feature)` features removed due to QC RSD<strong> >`r ThresholdQCrsd`%</strong>.
+* `r length(remove_SAMPLEcount$Feature)` features removed due to presence in<strong> <`r ThresholdSAMPLECountFrequency `%</strong> of biological samples.
+* `r length(remove_lowVAR$Feature)` features removed due to RSD ratios between biological and QC samples<strong> <`r ThresholdRSDratios`%</strong>.
+* `r length(remove_median_LOQlo$Feature)` features removed due to median area in biological samples less than<strong>  `r LOQlo`*LOQ</strong>.
+* `r length(remove_median_LOQhi$Feature)` features removed due to median area in biological samples less than<strong> `r LOQhi`*LOQ</strong>.
+
+**`r totalRemoved` features removed due to combined application of all filters.**
+
+**A total of `r totalRemain` features remain.**
+
+* The reduced dataset containing features passing all filters has been saved to:
+<p><small>`r getwd()`/reports/`r paste(tools::file_path_sans_ext(filename), "_features_remaining.csv", sep="")`.</small>  
+
+* A dataset containing features removed by filters has been saved to:
+<p><small>`r getwd()`/reports/`r paste(tools::file_path_sans_ext(filename), "_features_removed.csv", sep="")`.</small>
+
+<hr/>
+
+**Figure 1:** Visual expression of feature filtration by category.  
+
+```{r, graph_output, include=TRUE, fig.width=10, fig.height=11}
+# Refactor for graphing
+#--------------------------------------------------------------------------------------------------------------
+  output2$Kept <- factor(output2$Kept, levels=c("Removed","Kept"))
+  output2$Filter <- as.factor(output2$Filter)
+  output2$Filter <- factor(output2$Filter, levels=c("Blank Contribution",
+                                                  "LOQ Ratio Low",
+                                                  "LOQ Ratio High",
+                                                  "QC Count",
+                                                  "QC RSD",
+                                                  "Sample Count",
+                                                  "Sample Variability",
+                                                  "All Filters"))
+  # Graph it
+  plotout <- ggplot(output2, aes(x=Filter, y=Feature, fill=Kept)) + 
+    geom_tile() + 
+    theme(legend.title=element_blank(),
+          legend.position="bottom",
+          axis.text.y=element_blank(), 
+          axis.ticks.y=element_blank())
+  plotout
+```
+
+```{r, dataset_output}
+# Build the output files and write them to the working directory.
+#--------------------------------------------------------------------------------------------------------------
+  exclusion_list <- output2 %>% 
+    filter(Filter=="All Filters" & Kept=="Removed") %>% 
+    select(Feature)
+  append <- c("_features_remaining.csv", "_features_excluded.csv")
+  exclude <- c(FALSE, TRUE)
+  for (i in c(1:2)){
+    out_file <- metab[,which(names(metab) %in% exclusion_list$Feature==exclude[i])]
+    if (i==2) out_file <- cbind(metab[,c(1:3)], out_file)
+    out_file <- out_file[,-2]
+    out_file[is.na(out_file)] <- missing_indicator
+    out_file <- t(out_file)
+    out_file <- cbind(as.character(row.names(out_file)), out_file)
+    if (i==2) {
+      out_file <- as.data.frame(out_file)
+      names(out_file)[1] <- "Feature"
+      out_file <- out_file %>%
+        left_join(output[,-9])
+      x <- dim(out_file)[2]
+      nfilt <- 6
+      out_file[1,c((x-nfilt):x)] <- "Filter"
+      out_file[2,c((x-nfilt):x)] <- names(out_file)[c((x-nfilt):x)]
+      out_file <- cbind(out_file[,1],
+                        out_file[,c((x-nfilt):x)],
+                        out_file[,c(2:(x-(nfilt+1)))]
+                        )
+      names(out_file)[1]="V1"
+    }
+    out_file <- as.data.frame(out_file)
+    out_file[,1] <- gsub("Feature ","",out_file[,1])
+    if (!is.null(feature_info)) out_file <- inner_join(feature_info, out_file, by="V1")
+    out_file <- as.matrix(out_file)
+    write.table(x = out_file, 
+                file = gsub(pattern = "raw",
+                            replacement = "reports",
+                            x = paste(tools::file_path_sans_ext(filename), append[i], sep="")), 
+                row.names = FALSE,
+                col.names = FALSE,
+                sep = ",")
+  }
+```
+
+**Figure 2:** Details of filter application effect. Density of occurrence for each filter metric. Red lines indicate the chosen quality thresholds. Only a reasonable range of the density curves are shown.
+
+```{r, density_out, include=TRUE, fig.width=10, fig.height=3, warning=FALSE}
+# Generates graphs showing which proportions of the feature populations are removed by each sequential filter.
+#--------------------------------------------------------------------------------------------------------------
+labsize=8
+# Build blank distribution graph
+ggblank <- ggplot(blank_contribution, aes(x=percent))+
+  geom_density(fill="salmon")+
+  theme_classic()+
+  geom_vline(xintercept=ThresholdBlankContribution, colour="red")+
+  xlab("Blank Contribution")+
+  ylab("Metric Kernel Density")+
+  theme(axis.title = element_text(size=labsize))+
+  scale_x_continuous(limits=c(0,200))
+temp <- ggplot_build(ggblank)$data[[1]]
+ggblank <- ggblank +
+  geom_area(data=subset(temp, x<=ThresholdBlankContribution),
+            aes(x=x, y=y), fill="cyan1", colour="black")
+
+# Build QC count distribution graph
+ggqccount <- ggplot(QC_count, aes(x=CountFreq))+
+  geom_density(fill="salmon")+
+  theme_classic()+
+  geom_vline(xintercept=ThresholdQCCountFrequency, colour="red")+
+  xlab("QC Detection %")+
+  theme(axis.title = element_text(size=labsize))+
+  theme(axis.title.y = element_blank())
+temp <- ggplot_build(ggqccount)$data[[1]]
+ggqccount <- ggqccount +
+  geom_area(data=subset(temp, x>=ThresholdQCCountFrequency),
+            aes(x=x, y=y), fill="cyan1", colour="black")
+
+# Build QC RSD distribution graph
+ggqcrsd <- ggplot(QC_RSD, aes(x=rsd))+
+  geom_density(fill="salmon")+
+  theme_classic()+
+  geom_vline(xintercept=ThresholdQCrsd, colour="red")+
+  xlab("QC Consistency")+
+  theme(axis.title = element_text(size=labsize))+
+  theme(axis.title.y = element_blank())+
+  scale_x_continuous(limits=c(0,100))
+temp <- ggplot_build(ggqcrsd)$data[[1]]
+ggqcrsd <- ggqcrsd +
+  geom_area(data=subset(temp, x<=ThresholdQCrsd),
+            aes(x=x, y=y), fill="cyan1", colour="black")
+
+# Build sample count distribution graph
+ggsamcount <- ggplot(SAMPLE_count, aes(x=CountFreq))+
+  geom_density(fill="salmon")+
+  theme_classic()+
+  geom_vline(xintercept=ThresholdSAMPLECountFrequency, colour="red")+
+  xlab("Sample Detection %")+
+  theme(axis.title = element_text(size=labsize))+
+  theme(axis.title.y = element_blank())
+temp <- ggplot_build(ggsamcount)$data[[1]]
+ggsamcount <- ggsamcount +
+  geom_area(data=subset(temp, x>=ThresholdSAMPLECountFrequency),
+            aes(x=x, y=y), fill="cyan1", colour="black")
+
+# Build sample variability distribution graph
+ggvariability <- ggplot(low_variability, aes(x=percent))+
+  geom_density(fill="salmon")+
+  theme_classic()+
+  geom_vline(xintercept=ThresholdRSDratios, colour="red")+
+  xlab("Sample Variability")+
+  theme(axis.title = element_text(size=labsize))+
+  theme(axis.title.y = element_blank())+
+  scale_x_continuous(limits=c(0,400))
+temp <- ggplot_build(ggvariability)$data[[1]]
+ggvariability <- ggvariability +
+  geom_area(data=subset(temp, x>=ThresholdRSDratios),
+            aes(x=x, y=y), fill="cyan1", colour="black")
+
+# Build sample median/LOQ distribution graph
+  ggLOQ <- ggplot(median_check %>% filter(medRatio!="NaN"), aes(x=`medRatio`))+
+    geom_density(fill="salmon")+
+    theme_classic()+
+    geom_vline(xintercept=LOQlo, colour="darkred")+
+    geom_vline(xintercept=LOQhi, colour="red")+
+    xlab("LOQ Ratio")+
+    theme(axis.title = element_text(size=labsize))+
+    theme(axis.title.y = element_blank())+
+    scale_x_continuous(limits=c(0,100))
+  temp <- ggplot_build(ggLOQ)$data[[1]]
+  ggLOQ <- ggLOQ +
+    geom_area(data=subset(temp, x>=LOQhi),
+              aes(x=x, y=y), fill="cyan1", colour="black")#+
+    #geom_area(data=subset(temp, x<10),
+    #          aes(x=x, y=y), fill="salmon", colour="black")
+
+multiplot(ggblank,
+          ggLOQ,
+          ggqccount,
+          ggqcrsd,
+          ggsamcount,
+          ggvariability,
+          cols=6)
+```
